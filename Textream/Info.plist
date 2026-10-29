@@ -12,14 +12,14 @@
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>LSHandlerRank</key>
-			<string>Owner</string>
+			<string>Alternate</string>
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>dev.fka.textream.document</string>
 			</array>
 		</dict>
 	</array>
-	<key>UTExportedTypeDeclarations</key>
+	<key>UTImportedTypeDeclarations</key>
 	<array>
 		<dict>
 			<key>UTTypeConformsTo</key>
@@ -44,10 +44,10 @@
 	<array>
 		<dict>
 			<key>CFBundleURLName</key>
-			<string>dev.fka.textream</string>
+			<string>com.liyitingglitch.textream.ta</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
-				<string>textream</string>
+				<string>textream-ta</string>
 			</array>
 		</dict>
 	</array>
@@ -57,12 +57,12 @@
 			<key>NSMenuItem</key>
 			<dict>
 				<key>default</key>
-				<string>Read in Textream</string>
+				<string>Read in Textream TA</string>
 			</dict>
 			<key>NSMessage</key>
 			<string>readInTextream</string>
 			<key>NSPortName</key>
-			<string>Textream</string>
+			<string>Textream TA</string>
 			<key>NSSendTypes</key>
 			<array>
 				<string>public.utf8-plain-text</string>

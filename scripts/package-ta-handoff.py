@@ -43,7 +43,7 @@ def main():
     subprocess.run(["git", "diff", "--exit-code", "--quiet", binary_commit, source_commit,
                     "--", "Textream", "TARegressionTests.swift"], cwd=repo, check=True)
     info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
-    if info.get("CFBundleIdentifier") != "dev.fka.textream":
+    if info.get("CFBundleIdentifier") != "com.liyitingglitch.textream.ta":
         parser.error("Expected the full Textream app, not the integration harness")
     executable = app / "Contents/MacOS" / info["CFBundleExecutable"]
     subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)

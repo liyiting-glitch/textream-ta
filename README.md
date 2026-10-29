@@ -1,4 +1,8 @@
-> **Zoom TA Assistant — Codex handoff:** Use branch `codex/zoom-live-notch`, not the older `master` branch.
+> **Independent Textream TA edition:** Use branch `codex/lecture-interrupt-resume` in [liyiting-glitch/textream-ta](https://github.com/liyiting-glitch/textream-ta). The macOS app is **Textream TA**, bundle ID `com.liyitingglitch.textream.ta`, and can be installed beside official Textream. The source includes lecture interruption and manual resume plus the editor-window dismissal fix.
+>
+> Build this branch with [TA Assistant checks](https://github.com/liyiting-glitch/textream-ta/actions/workflows/ta-checks.yml), then use its `Textream-TA-unsigned` artifact. The original handoff download below is an older baseline and does not contain these later changes. TA builds do not auto-update from official Textream releases. The independent URL scheme is `textream-ta://read?text=Hello%20world`.
+>
+> **Original Zoom TA handoff baseline:** `codex/zoom-live-notch`; the older `master` branch is not the current TA source.
 >
 > **[Download the complete handoff package and app](https://github.com/George121380/textream/releases/tag/ta-handoff-2026-10-28)** · **[Start here: CODEX_HANDOFF.md](CODEX_HANDOFF.md)** · [Setup and limitations](TA_ASSISTANT.md)
 >

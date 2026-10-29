@@ -12,6 +12,16 @@ open Textream/Textream.xcodeproj
 
 Select the **Textream** macOS scheme, choose **My Mac**, configure your own signing team if needed, and build with **Command-R**. The upstream macOS application requires macOS 15+ and Xcode 16+; Xcode 26 is recommended for this combined macOS/iOS project. Xcode 14 cannot build the full project. The original Homebrew/App Store downloads do not include this fork's changes.
 
+## Installing the independent Textream TA edition
+
+The current custom branch is `codex/lecture-interrupt-resume` in `liyiting-glitch/textream-ta`. Its macOS product is **Textream TA.app**, bundle ID `com.liyitingglitch.textream.ta`, build 2. Official Textream remains a separate application. The custom scheme is `textream-ta://`; `.textream` documents remain compatible without claiming the default document handler.
+
+Use the existing **TA Assistant checks** workflow on that branch. The artifact **Textream-TA-unsigned** contains `Textream-TA-unsigned.zip` and `Textream-TA-build.json`; the latter records the source commit, CI URL, independent identity, architectures and hashes. Verify that manifest, unpack, ad-hoc sign the complete app locally, and install it at a stable path such as `~/Applications/Textream TA.app`. Do not overwrite `/Applications/Textream.app`.
+
+The new application has separate preferences and macOS permissions. Enable its Screen & System Audio Recording and Speech Recognition permissions, set the notch width to 750, and enable the assistant only when ready. The Keychain service remains `textream.ta.openai`; any access prompt must be completed normally, and keys must never be exported. A new build does not imply that existing permissions have migrated.
+
+**Download TA builds…** opens this fork's build page; automatic official-upstream update checks are disabled. The original publisher's attribution remains in About.
+
 ## Local TA integration test without upgrading Xcode
 
 To test the real TA module independently of the full Textream project, run this from the repository root:
@@ -38,6 +48,20 @@ For Zoom office hours, set **Speech language → English (US)** and **Reply lang
 
 You can switch off automatic replies and use **Generate reply** when the full question is ready. Typing or correcting a question pauses audio so speech cannot overwrite your edit. **New student** cancels work and clears conversational context. Closing the assistant stops capture and requests and clears the conversation.
 
+## Lecture + Q&A (local source update)
+
+This mode supports a prepared teaching segment followed by free discussion. It is implemented in the local source and has not yet been built into a replacement full application.
+
+1. Put your prepared script in the main Textream editor, using separate pages if useful. Enable the TA assistant, then choose **Start lecture from editor**. The lecture starts on the selected nonempty page (or the first nonempty page) in Classic scrolling and Pinned to Notch mode.
+2. When meeting playback produces a transcript, the lecture pauses at its current displayed reading position. You can use **Pause for question** to pause earlier. Automatic interruption depends on transcription timing and also reacts to unrelated playback; switch off **Pause lecture when meeting speech is detected** for manual interruption control.
+3. A completed answer appears in a separate temporary reader. The original script, page and fractional reading position stay intact. Follow-up questions reuse the original saved position. Audio capture continues while the answer is shown.
+4. When you have finished answering, choose **Resume lecture** in the answer reader or the assistant panel. This explicitly restores the original reader and its previous pause state. Closing an answer or reaching its end does not resume the lecture automatically. Resuming cancels pending responses so an old answer cannot overwrite the restored script. Your explicit Pause audio setting is preserved; use Resume audio separately when you want to listen again.
+5. Choose **Finish lecture / free discussion** for the second segment. Lecture readers close; the enabled assistant continues handling questions in the existing discussion mode. Disabling or closing the assistant ends the lecture. If the saved script page was edited or removed during the interruption, recovery is refused rather than jumping to different text.
+
+During a lecture, up to 12,000 characters near the reading position are included as reference content with a question. The combined lecture excerpt and course notes remain capped at 16,000 characters. Replies never rewrite the editor pages. Lecture reading uses the original notch; external/browser mirror output is hidden during this mode so a second copy cannot keep advancing.
+
+Local validation includes **90 TA mock checks** and **40 standalone lecture-session mock checks**. The full Swift sources can be typechecked with this workspace's isolated CLT overlay while omitting the Xcode-only `#Preview` declaration. These checks are not a full Xcode build and do not establish live window, audio, API, or Zoom behavior. The existing cloud workflow now also runs the lecture-session checks once the user chooses to build. No GitHub login or upload was performed for this update.
+
 ## Scope and data
 
 - Captures **all Mac playback**, not just Zoom/Meet, and excludes this application's own output. The microphone is not connected to the assistant. Close unrelated audio. This is not speaker diarization; system playback can still contain a recording of your own voice or shared videos.
@@ -50,7 +74,7 @@ You can switch off automatic replies and use **Generate reply** when the full qu
 
 ## Validation
 
-The latest app source (`8ff2e52`) passed all **44** regression checks and the full universal macOS build in [GitHub Actions](https://github.com/George121380/textream/actions/runs/40820924263). The full application was installed and launched on macOS 15.7.3 without upgrading Xcode; the saved Terra key was recognized and system-audio capture was restored. The notch width limit is 900, with 750 applied locally. Actual Zoom trial questions produced English answers; observed generation times of 1.8–2.0 seconds exclude transcription and pause detection. The revised shortcut opened the assistant locally and registered globally, but physical-keyboard invocation from a foreground Zoom meeting still needs explicit confirmation.
+The packaged handoff app source (`8ff2e52`) passed all **44** regression checks and the full universal macOS build in [GitHub Actions](https://github.com/George121380/textream/actions/runs/40820924263). The full application was installed and launched on macOS 15.7.3 without upgrading Xcode; the saved Terra key was recognized and system-audio capture was restored. The notch width limit is 900, with 750 applied locally. Actual Zoom trial questions produced English answers; observed generation times of 1.8–2.0 seconds exclude transcription and pause detection. The revised shortcut opened the assistant locally and registered globally, but physical-keyboard invocation from a foreground Zoom meeting still needs explicit confirmation.
 
 For a locally ad-hoc-signed update, macOS may retain the previous binary’s Screen & System Audio Recording requirement even when the switch is on. Remove only Textream’s stale entry, add the newly installed Textream.app from its exact path, and choose Quit & Reopen. Speech Recognition may also need toggling and a restart. Keep the app at a stable install path; do not disable macOS security protections.
 

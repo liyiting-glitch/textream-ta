@@ -18,6 +18,8 @@ class TextreamService: NSObject, ObservableObject {
     let browserServer = BrowserServer()
     let directorServer = DirectorServer()
     var onOverlayDismissed: (() -> Void)?
+    var onLectureOverlayDismissed: (() -> Void)?
+    var isLecturePresentation = false
     var launchedExternally = false
     @Published var directorIsReading = false
 
@@ -50,8 +52,17 @@ class TextreamService: NSObject, ObservableObject {
             self?.externalDisplayController.dismiss()
             self?.browserServer.hideContent()
             self?.onOverlayDismissed?()
+            self?.onLectureOverlayDismissed?()
         }
         updatePageInfo()
+
+        // A lecture retains one reader so interruption answers cannot advance a
+        // second, mirrored copy of the script or expose it through browser output.
+        if isLecturePresentation {
+            externalDisplayController.dismiss()
+            browserServer.hideContent()
+            return
+        }
 
         // Also show on external display if configured (same parsing as overlay)
         let words = splitTextIntoWords(trimmed)
@@ -122,7 +133,7 @@ class TextreamService: NSObject, ObservableObject {
         externalDisplayController.overlayContent.totalCharCount = words.joined(separator: " ").count
         externalDisplayController.overlayContent.hasNextPage = hasNextPage
 
-        if browserServer.isRunning {
+        if !isLecturePresentation && browserServer.isRunning {
             browserServer.updateContent(
                 words: words,
                 totalCharCount: words.joined(separator: " ").count,
@@ -163,10 +174,15 @@ class TextreamService: NSObject, ObservableObject {
 
     func hideMainWindow() {
         DispatchQueue.main.async {
-            for window in NSApp.windows where !(window is NSPanel) {
-                window.makeFirstResponder(nil)
-                window.orderOut(nil)
-            }
+            self.hideMainWindowImmediately()
+        }
+    }
+
+    @MainActor
+    func hideMainWindowImmediately() {
+        for window in NSApp.windows where !(window is NSPanel) {
+            window.makeFirstResponder(nil)
+            window.orderOut(nil)
         }
     }
 
@@ -494,9 +510,9 @@ class TextreamService: NSObject, ObservableObject {
         readText(text)
     }
 
-    // URL scheme handler: textream://read?text=Hello%20World
+    // Independent TA URL scheme; official textream:// remains with the original app.
     func handleURL(_ url: URL) {
-        guard url.scheme == "textream" else { return }
+        guard url.scheme == "textream-ta" else { return }
 
         if url.host == "read" || url.path == "/read" {
             if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),

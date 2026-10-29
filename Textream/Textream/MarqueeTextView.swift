@@ -289,7 +289,13 @@ struct SpeechScrollView: View {
             }
             .onAppear {
                 containerHeight = geo.size.height
-                scrollOffset = initialScrollOffset(containerHeight: containerHeight)
+                // A retained lecture reader can reappear while still manually
+                // paused, so no progress/listening change will re-anchor it.
+                if highlightedCharCount > 0 || smoothWordProgress > 0 {
+                    recalculateTracking(containerHeight: containerHeight)
+                } else {
+                    scrollOffset = initialScrollOffset(containerHeight: containerHeight)
+                }
             }
             .overlay(
                 ScrollWheelView(

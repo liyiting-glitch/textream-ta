@@ -757,8 +757,7 @@ Happy presenting! [wave]
         service.onOverlayDismissed = { [self] in
             isRunning = false
             service.readPages.removeAll()
-            NSApp.activate(ignoringOtherApps: true)
-            NSApp.windows.first?.makeKeyAndOrderFront(nil)
+            // Keep the editor hidden until the user explicitly reopens it.
         }
         service.readPages.removeAll()
         // If the current page is empty, find the first non-empty page
@@ -830,15 +829,15 @@ struct AboutView: View {
 
             // App name & version
             VStack(spacing: 4) {
-                Text("Textream")
+                Text("Textream TA")
                     .font(.system(size: 20, weight: .bold))
-                Text("Version \(appVersion)")
+                Text("Version \(appVersion) · TA build \(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "2")")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             }
 
             // Description
-            Text("A free, open-source teleprompter that highlights your script in real-time as you speak.")
+            Text("A lecture teleprompter with optional meeting transcription, temporary AI replies, and manual script resume.")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -846,7 +845,7 @@ struct AboutView: View {
 
             // Links
             HStack(spacing: 12) {
-                Link(destination: URL(string: "https://github.com/f/textream")!) {
+                Link(destination: URL(string: "https://github.com/liyiting-glitch/textream-ta")!) {
                     HStack(spacing: 5) {
                         Image(systemName: "chevron.left.forwardslash.chevron.right")
                             .font(.system(size: 11, weight: .semibold))
@@ -860,7 +859,7 @@ struct AboutView: View {
                     .clipShape(Capsule())
                 }
 
-                Link(destination: URL(string: "https://textream.net/privacy.html")!) {
+                Link(destination: URL(string: "https://github.com/liyiting-glitch/textream-ta/blob/codex/lecture-interrupt-resume/TA_ASSISTANT.md#scope-and-data")!) {
                     HStack(spacing: 5) {
                         Image(systemName: "hand.raised.fill")
                             .font(.system(size: 11, weight: .semibold))
@@ -895,7 +894,7 @@ struct AboutView: View {
             Divider().padding(.horizontal, 20)
 
             VStack(spacing: 4) {
-                Text("Made by Fatih Kadir Akin")
+                Text("Based on Textream by Fatih Kadir Akin")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                 Text("Original idea by Semih Kışlar")

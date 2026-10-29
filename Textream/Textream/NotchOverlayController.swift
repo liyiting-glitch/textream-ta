@@ -52,14 +52,42 @@ class OverlayContent {
     var jumpToPageIndex: Int? = nil
 }
 
+/// Reading position belongs to the controller so an interruption can retain the
+/// original view, including its fractional word position and manual pause state.
+@Observable
+class OverlayPlaybackState {
+    var timerWordProgress: Double = 0
+    var isPaused = false
+    var isUserScrolling = false
+    var isInterrupted = false
+    var isActive = false
+    var generation = UUID()
+    var completionRevision = UUID()
+    var onResumeLecture: (() -> Void)?
+
+    func reset() {
+        generation = UUID()
+        completionRevision = UUID()
+        timerWordProgress = 0
+        isPaused = false
+        isUserScrolling = false
+        isInterrupted = false
+        isActive = true
+    }
+}
+
 class NotchOverlayController: NSObject {
     private let cursorOffset: CGFloat = 8
     private let screenEdgeMargin: CGFloat = 5
     private var panel: NSPanel?
     let speechRecognizer = SpeechRecognizer()
     let overlayContent = OverlayContent()
+    let playbackState = OverlayPlaybackState()
     var onComplete: (() -> Void)?
     var onNextPage: (() -> Void)?
+    var onResumeLecture: (() -> Void)? {
+        didSet { playbackState.onResumeLecture = onResumeLecture }
+    }
     private var cancellables = Set<AnyCancellable>()
     private var isDismissing = false
     private var frameTracker: NotchFrameTracker?
@@ -69,14 +97,18 @@ class NotchOverlayController: NSObject {
     private var stopButtonPanel: NSPanel?
     private var escMonitor: Any?
     private var keepAwakeActivity: NSObjectProtocol?
+    private var dismissalGeneration = UUID()
+    private var interruptionPauseState: Bool?
+    private var interruptionWasListening = false
+    private var supportsInterruption = true
 
     func show(text: String, hasNextPage: Bool = false, onComplete: (() -> Void)? = nil) {
+        forceClose()
         self.onComplete = onComplete
         self.onNextPage = {
             TextreamService.shared.advanceToNextPage()
         }
-        self.isDismissing = false
-        forceClose()
+        playbackState.reset()
         observeDismiss()
 
         // Populate overlay content
@@ -87,6 +119,7 @@ class NotchOverlayController: NSObject {
         overlayContent.hasNextPage = hasNextPage
 
         let settings = NotchSettings.shared
+        supportsInterruption = settings.overlayMode != .fullscreen
 
         let screen: NSScreen
         switch settings.notchDisplayMode {
@@ -141,6 +174,9 @@ class NotchOverlayController: NSObject {
         speechRecognizer.shouldDismiss = false
         speechRecognizer.shouldAdvancePage = false
         speechRecognizer.lastSpokenText = ""
+        playbackState.timerWordProgress = 0
+        playbackState.isUserScrolling = false
+        playbackState.completionRevision = UUID()
 
         overlayContent.words = normalized
         overlayContent.paragraphBreakBeforeWordIndices = paragraphBreakWordIndices(in: text)
@@ -151,6 +187,62 @@ class NotchOverlayController: NSObject {
         if settings.listeningMode != .classic {
             speechRecognizer.start(with: text)
         }
+    }
+
+    /// Repeated interruptions retain the pause state from the first interruption.
+    @discardableResult
+    func pauseForInterruption() -> Bool {
+        guard panel != nil, !isDismissing, !speechRecognizer.shouldDismiss,
+              supportsInterruption else { return false }
+        if interruptionPauseState == nil {
+            interruptionPauseState = playbackState.isPaused
+            interruptionWasListening = speechRecognizer.isListening || speechRecognizer.isStarting
+        }
+        playbackState.isInterrupted = true
+        playbackState.isPaused = true
+        playbackState.completionRevision = UUID()
+        discardPendingNavigation()
+        if interruptionWasListening { speechRecognizer.stop() }
+        return true
+    }
+
+    /// Keep the hosting view and all reading state alive while an answer is shown.
+    func hideForInterruption() {
+        guard interruptionPauseState != nil else { return }
+        panel?.orderOut(nil)
+        stopButtonPanel?.orderOut(nil)
+        removeEscMonitor()
+    }
+
+    @discardableResult
+    func resumeAfterInterruption() -> Bool {
+        guard let panel, let wasPaused = interruptionPauseState, !isDismissing else { return false }
+        discardPendingNavigation()
+        playbackState.isPaused = wasPaused
+        playbackState.isInterrupted = false
+        playbackState.completionRevision = UUID()
+        interruptionPauseState = nil
+        if interruptionWasListening, NotchSettings.shared.listeningMode != .classic {
+            speechRecognizer.resume()
+        }
+        interruptionWasListening = false
+        panel.orderFrontRegardless()
+        stopButtonPanel?.orderFrontRegardless()
+        installKeyMonitor()
+        return true
+    }
+
+    private func discardPendingNavigation() {
+        speechRecognizer.shouldAdvancePage = false
+        overlayContent.jumpToPageIndex = nil
+        overlayContent.showPagePicker = false
+    }
+
+    /// Replacing an answer must not later run the old answer's completion callback.
+    func closeImmediately() {
+        forceClose()
+        onComplete = nil
+        onNextPage = nil
     }
 
     private func screenUnderMouse() -> NSScreen? {
@@ -187,6 +279,7 @@ class NotchOverlayController: NSObject {
     }
 
     private func updateCursorPosition() {
+        guard !playbackState.isInterrupted else { return }
         guard let panel else { return }
         let mouse = NSEvent.mouseLocation
         guard let screen = screenUnderMouse() ?? panel.screen ?? NSScreen.main else { return }
@@ -209,6 +302,7 @@ class NotchOverlayController: NSObject {
     }
 
     private func checkMouseScreen() {
+        guard !playbackState.isInterrupted else { return }
         guard let panel, let frameTracker else { return }
         guard let mouseScreen = screenUnderMouse() else { return }
         let mouseScreenID = mouseScreen.displayID
@@ -251,6 +345,7 @@ class NotchOverlayController: NSObject {
         let overlayView = NotchOverlayView(
             content: overlayContent,
             speechRecognizer: speechRecognizer,
+            playback: playbackState,
             menuBarHeight: menuBarHeight,
             frameTracker: tracker
         )
@@ -303,6 +398,7 @@ class NotchOverlayController: NSObject {
         let floatingView = FloatingOverlayView(
             content: overlayContent,
             speechRecognizer: speechRecognizer,
+            playback: playbackState,
             baseHeight: panelHeight,
             followingCursor: true
         )
@@ -372,6 +468,7 @@ class NotchOverlayController: NSObject {
         let floatingView = FloatingOverlayView(
             content: overlayContent,
             speechRecognizer: speechRecognizer,
+            playback: playbackState,
             baseHeight: panelHeight
         )
         let contentView = NSHostingView(rootView: floatingView)
@@ -401,7 +498,7 @@ class NotchOverlayController: NSObject {
     }
 
     func dismiss() {
-        guard !isDismissing else { return }
+        guard panel != nil, !isDismissing else { return }
         isDismissing = true
 
         // Trigger the shrink animation
@@ -409,20 +506,14 @@ class NotchOverlayController: NSObject {
         speechRecognizer.forceStop()
 
         // Wait for animation, then remove panel
+        let expectedGeneration = dismissalGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-            guard let self else { return }
-            self.stopMouseTracking()
-            self.stopCursorTracking()
-            self.removeStopButton()
-            self.removeEscMonitor()
-            self.cancellables.removeAll()
-            self.panel?.orderOut(nil)
-            self.panel = nil
-            self.frameTracker = nil
-            self.endKeepAwakeActivity()
-            self.speechRecognizer.shouldDismiss = false
-            self.isDismissing = false
-            self.onComplete?()
+            guard let self, self.dismissalGeneration == expectedGeneration,
+                  self.isDismissing else { return }
+            let completion = self.onComplete
+            self.forceClose()
+            self.onComplete = nil
+            completion?()
         }
     }
 
@@ -443,6 +534,14 @@ class NotchOverlayController: NSObject {
     }
 
     private func forceClose() {
+        dismissalGeneration = UUID()
+        playbackState.isActive = false
+        playbackState.generation = UUID()
+        playbackState.completionRevision = UUID()
+        playbackState.isInterrupted = false
+        interruptionPauseState = nil
+        interruptionWasListening = false
+        isDismissing = false
         stopMouseTracking()
         stopCursorTracking()
         removeStopButton()
@@ -456,6 +555,7 @@ class NotchOverlayController: NSObject {
         endKeepAwakeActivity()
         speechRecognizer.shouldDismiss = false
         speechRecognizer.shouldAdvancePage = false
+        overlayContent.jumpToPageIndex = nil
     }
 
     private func observeDismiss() {
@@ -465,35 +565,24 @@ class NotchOverlayController: NSObject {
             .sink { [weak self] _ in
                 guard let self else { return }
 
+                if self.playbackState.isInterrupted { self.discardPendingNavigation() }
+
                 // Check for page advance
-                if self.speechRecognizer.shouldAdvancePage {
+                if self.speechRecognizer.shouldAdvancePage, !self.playbackState.isInterrupted,
+                   !self.playbackState.isPaused {
                     self.speechRecognizer.shouldAdvancePage = false
                     self.onNextPage?()
                 }
 
                 // Check for page jump from page picker
-                if let targetIndex = self.overlayContent.jumpToPageIndex {
+                if let targetIndex = self.overlayContent.jumpToPageIndex, !self.playbackState.isInterrupted {
                     self.overlayContent.jumpToPageIndex = nil
                     TextreamService.shared.jumpToPage(index: targetIndex)
                 }
 
                 // Check for dismiss
                 if self.speechRecognizer.shouldDismiss, !self.isDismissing {
-                    self.isDismissing = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-                        guard let self else { return }
-                        self.stopMouseTracking()
-                        self.stopCursorTracking()
-                        self.removeStopButton()
-                        self.removeEscMonitor()
-                        self.cancellables.removeAll()
-                        self.panel?.orderOut(nil)
-                        self.panel = nil
-                        self.frameTracker = nil
-                        self.endKeepAwakeActivity()
-                        self.speechRecognizer.shouldDismiss = false
-                        self.onComplete?()
-                    }
+                    self.dismiss()
                 }
             }
             .store(in: &cancellables)
@@ -679,6 +768,7 @@ struct DynamicIslandShape: Shape {
 struct NotchOverlayView: View {
     @Bindable var content: OverlayContent
     @Bindable var speechRecognizer: SpeechRecognizer
+    @Bindable var playback: OverlayPlaybackState
     let menuBarHeight: CGFloat
     var frameTracker: NotchFrameTracker
 
@@ -691,10 +781,7 @@ struct NotchOverlayView: View {
     @State private var contentVisible = false
     @State private var dragStartHeight: CGFloat = -1
 
-    // Timer-based scroll for classic & silence-paused modes
-    @State private var timerWordProgress: Double = 0
-    @State private var isPaused: Bool = false
-    @State private var isUserScrolling: Bool = false
+    // The controller retains reading state while this panel is interrupted.
     private let scrollTimer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
 
     // Auto next page countdown
@@ -747,7 +834,7 @@ struct NotchOverlayView: View {
         case .wordTracking:
             return speechRecognizer.recognizedCharCount
         case .classic, .silencePaused:
-            return charOffsetForWordProgress(timerWordProgress)
+            return charOffsetForWordProgress(playback.timerWordProgress)
         }
     }
 
@@ -813,7 +900,7 @@ struct NotchOverlayView: View {
                         .frame(height: menuBarHeight)
 
                         if content.showPagePicker {
-                            pagePickerView
+                            pagePickerView.disabled(playback.isInterrupted)
                         } else if isDone && (listeningMode == .wordTracking || hasNextPage) {
                             doneView
                         } else {
@@ -862,50 +949,39 @@ struct NotchOverlayView: View {
         }
         .animation(.easeInOut(duration: 0.5), value: isDone)
         .onChange(of: isDone) { _, done in
-            if done {
-                // In word tracking mode, stop listening when page is done
-                if listeningMode == .wordTracking {
-                    speechRecognizer.stop()
-                }
-                if !hasNextPage {
-                    // Only auto-dismiss in word tracking mode.
-                    // In classic/silence-paused modes the speaker may still be
-                    // talking after the auto-scroll finishes, so keep the text
-                    // visible and let them dismiss manually (X button or Esc).
-                    if listeningMode == .wordTracking {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                            speechRecognizer.shouldDismiss = true
-                        }
-                    }
-                } else if NotchSettings.shared.autoNextPage {
-                    startCountdown()
-                }
-            } else {
-                cancelCountdown()
-            }
+            if done { handleCompletedPage() }
+            else { cancelCountdown() }
         }
+        .onChange(of: playback.isInterrupted) { _, interrupted in
+            if !interrupted && isDone { handleCompletedPage() }
+        }
+        .onChange(of: playback.isPaused) { _, paused in
+            if !paused && isDone { handleCompletedPage() }
+        }
+        .onDisappear { cancelCountdown() }
         .onReceive(scrollTimer) { _ in
-            guard !isDone, !isUserScrolling else { return }
+            guard playback.isActive, !playback.isInterrupted, !isDone,
+                  !playback.isUserScrolling else { return }
             let speed = NotchSettings.shared.scrollSpeed // words per second
             switch listeningMode {
             case .classic:
-                if !isPaused {
-                    timerWordProgress += speed * 0.05
+                if !playback.isPaused {
+                    playback.timerWordProgress += speed * 0.05
                 }
             case .silencePaused:
-                if !isPaused && speechRecognizer.isListening && speechRecognizer.isSpeaking {
-                    timerWordProgress += speed * 0.05
+                if !playback.isPaused && speechRecognizer.isListening && speechRecognizer.isSpeaking {
+                    playback.timerWordProgress += speed * 0.05
                 }
             case .wordTracking:
                 break
             }
         }
         .onChange(of: content.totalCharCount) { _, _ in
-            timerWordProgress = 0
+            playback.timerWordProgress = 0
         }
         .onChange(of: content.currentPageIndex) { _, _ in
-            timerWordProgress = 0
-            isUserScrolling = false
+            playback.timerWordProgress = 0
+            playback.isUserScrolling = false
         }
     }
 
@@ -914,7 +990,7 @@ struct NotchOverlayView: View {
         case .wordTracking, .silencePaused:
             return speechRecognizer.isListening
         case .classic:
-            return !isPaused
+            return !playback.isPaused
         }
     }
 
@@ -929,20 +1005,26 @@ struct NotchOverlayView: View {
                 cueUnreadOpacity: NotchSettings.shared.cueBrightness.unreadOpacity,
                 cueReadOpacity: NotchSettings.shared.cueBrightness.readOpacity,
                 onWordTap: { charOffset in
+                    guard !playback.isInterrupted else { return }
                     if listeningMode == .wordTracking {
                         speechRecognizer.jumpTo(charOffset: charOffset)
                     } else {
-                        timerWordProgress = wordProgressForCharOffset(charOffset)
+                        playback.timerWordProgress = wordProgressForCharOffset(charOffset)
                     }
                 },
                 onManualScroll: { scrolling, newProgress in
-                    isUserScrolling = scrolling
+                    if playback.isInterrupted {
+                        // Finish an in-flight gesture without moving the saved position.
+                        if !scrolling { playback.isUserScrolling = false }
+                        return
+                    }
+                    playback.isUserScrolling = scrolling
                     if !scrolling {
-                        timerWordProgress = max(0, min(Double(words.count), newProgress))
+                        playback.timerWordProgress = max(0, min(Double(words.count), newProgress))
                     }
                 },
                 smoothScroll: listeningMode != .wordTracking,
-                smoothWordProgress: timerWordProgress,
+                smoothWordProgress: playback.timerWordProgress,
                 isListening: isEffectivelyListening,
                 readingPosition: NotchSettings.shared.readingPosition,
                 paragraphBreakBeforeWordIndices: NotchSettings.shared.showParagraphDividers
@@ -996,9 +1078,18 @@ struct NotchOverlayView: View {
                     Spacer(minLength: 0)
                 }
 
+                if let resumeLecture = playback.onResumeLecture {
+                    Button("Resume lecture", action: resumeLecture)
+                        .font(.system(size: 11, weight: .semibold))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.yellow)
+                        .help("Return to the lecture at the saved reading position")
+                }
+
                 if content.pageCount > 1 {
                     if hasNextPage {
                         Button {
+                            guard !playback.isInterrupted else { return }
                             speechRecognizer.shouldAdvancePage = true
                         } label: {
                             Image(systemName: "forward.fill")
@@ -1012,11 +1103,13 @@ struct NotchOverlayView: View {
                         .simultaneousGesture(
                             LongPressGesture(minimumDuration: 0.5)
                                 .onEnded { _ in
+                                    guard !playback.isInterrupted else { return }
                                     content.showPagePicker = true
                                 }
                         )
                     } else {
                         Button {
+                            guard !playback.isInterrupted else { return }
                             content.jumpToPageIndex = 0
                         } label: {
                             Image(systemName: "backward.end.fill")
@@ -1030,6 +1123,7 @@ struct NotchOverlayView: View {
                         .simultaneousGesture(
                             LongPressGesture(minimumDuration: 0.5)
                                 .onEnded { _ in
+                                    guard !playback.isInterrupted else { return }
                                     content.showPagePicker = true
                                 }
                         )
@@ -1038,11 +1132,11 @@ struct NotchOverlayView: View {
 
                 if listeningMode == .classic {
                     Button {
-                        isPaused.toggle()
+                        if !playback.isInterrupted { playback.isPaused.toggle() }
                     } label: {
-                        Image(systemName: isPaused ? "play.fill" : "pause.fill")
+                        Image(systemName: playback.isPaused ? "play.fill" : "pause.fill")
                             .font(.system(size: 10, weight: .bold))
-                            .foregroundStyle(isPaused ? .white.opacity(0.6) : .yellow.opacity(0.8))
+                            .foregroundStyle(playback.isPaused ? .white.opacity(0.6) : .yellow.opacity(0.8))
                             .frame(width: 24, height: 24)
                             .background(.white.opacity(0.15))
                             .clipShape(Circle())
@@ -1143,6 +1237,7 @@ struct NotchOverlayView: View {
                     let preview = i < content.pagePreviews.count ? content.pagePreviews[i] : ""
                     if !preview.isEmpty {
                         Button {
+                            guard !playback.isInterrupted else { return }
                             content.jumpToPageIndex = i
                             content.showPagePicker = false
                         } label: {
@@ -1180,18 +1275,51 @@ struct NotchOverlayView: View {
         .transition(.opacity)
     }
 
+    private func handleCompletedPage() {
+        guard playback.isActive, !playback.isInterrupted, !playback.isPaused,
+              isDone else { return }
+        if listeningMode == .wordTracking { speechRecognizer.stop() }
+        if !hasNextPage {
+            if listeningMode == .wordTracking {
+                let revision = playback.completionRevision
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    guard playback.isActive, !playback.isInterrupted,
+                          playback.completionRevision == revision, isDone else { return }
+                    speechRecognizer.shouldDismiss = true
+                }
+            }
+        } else if (NotchSettings.shared.autoNextPage), countdownTimer == nil {
+            startCountdown()
+        }
+    }
+
     private func startCountdown() {
+        guard playback.isActive, !playback.isInterrupted, !playback.isPaused,
+              isDone else { return }
         countdownTimer?.invalidate()
         countdownRemaining = NotchSettings.shared.autoNextPageDelay
+        let generation = playback.generation
+        let revision = playback.completionRevision
         guard countdownRemaining > 0 else {
             countdownTimer = nil
             DispatchQueue.main.async {
+                guard playback.isActive, playback.generation == generation,
+                      playback.completionRevision == revision,
+                      !playback.isInterrupted, !playback.isPaused, isDone else { return }
                 speechRecognizer.shouldAdvancePage = true
             }
             return
         }
         countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { timer in
+            let tickRevision = playback.completionRevision
             DispatchQueue.main.async {
+                guard playback.isActive, playback.generation == generation, isDone else {
+                    timer.invalidate()
+                    return
+                }
+                // Discard ticks queued before an interruption, then resume future ticks.
+                guard playback.completionRevision == tickRevision,
+                      !playback.isInterrupted, !playback.isPaused else { return }
                 countdownRemaining -= 1
                 if countdownRemaining <= 0 {
                     timer.invalidate()
@@ -1221,6 +1349,7 @@ struct NotchOverlayView: View {
                             .animation(.easeInOut(duration: 0.3), value: countdownRemaining)
                     }
                     Button {
+                        guard !playback.isInterrupted else { return }
                         cancelCountdown()
                         speechRecognizer.shouldAdvancePage = true
                     } label: {
@@ -1274,6 +1403,7 @@ struct GlassEffectView: NSViewRepresentable {
 struct FloatingOverlayView: View {
     @Bindable var content: OverlayContent
     @Bindable var speechRecognizer: SpeechRecognizer
+    @Bindable var playback: OverlayPlaybackState
     let baseHeight: CGFloat
     var followingCursor: Bool = false
 
@@ -1287,10 +1417,7 @@ struct FloatingOverlayView: View {
     @State private var countdownRemaining: Int = 0
     @State private var countdownTimer: Timer? = nil
 
-    // Timer-based scroll for classic & silence-paused modes
-    @State private var timerWordProgress: Double = 0
-    @State private var isPaused: Bool = false
-    @State private var isUserScrolling: Bool = false
+    // The controller retains reading state while this panel is interrupted.
     private let scrollTimer = Timer.publish(every: 0.05, on: .main, in: .common).autoconnect()
 
     private var listeningMode: ListeningMode {
@@ -1330,7 +1457,7 @@ struct FloatingOverlayView: View {
         case .wordTracking:
             return speechRecognizer.recognizedCharCount
         case .classic, .silencePaused:
-            return charOffsetForWordProgress(timerWordProgress)
+            return charOffsetForWordProgress(playback.timerWordProgress)
         }
     }
 
@@ -1343,14 +1470,14 @@ struct FloatingOverlayView: View {
         case .wordTracking, .silencePaused:
             return speechRecognizer.isListening
         case .classic:
-            return !isPaused
+            return !playback.isPaused
         }
     }
 
     var body: some View {
         VStack(spacing: 0) {
             if content.showPagePicker {
-                floatingPagePickerView
+                floatingPagePickerView.disabled(playback.isInterrupted)
             } else if isDone && (listeningMode == .wordTracking || hasNextPage) {
                 floatingDoneView
             } else {
@@ -1397,45 +1524,39 @@ struct FloatingOverlayView: View {
         }
         .animation(.easeInOut(duration: 0.5), value: isDone)
         .onChange(of: isDone) { _, done in
-            if done {
-                if listeningMode == .wordTracking {
-                    speechRecognizer.stop()
-                }
-                if !hasNextPage {
-                    if listeningMode == .wordTracking {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                            speechRecognizer.shouldDismiss = true
-                        }
-                    }
-                } else if followingCursor || NotchSettings.shared.autoNextPage {
-                    startCountdown()
-                }
-            } else {
-                cancelCountdown()
-            }
+            if done { handleCompletedPage() }
+            else { cancelCountdown() }
         }
+        .onChange(of: playback.isInterrupted) { _, interrupted in
+            if !interrupted && isDone { handleCompletedPage() }
+        }
+        .onChange(of: playback.isPaused) { _, paused in
+            if !paused && isDone { handleCompletedPage() }
+        }
+        .onDisappear { cancelCountdown() }
         .onReceive(scrollTimer) { _ in
-            guard !isDone, !isUserScrolling else { return }
+            guard playback.isActive, !playback.isInterrupted, !isDone,
+                  !playback.isUserScrolling else { return }
             let speed = NotchSettings.shared.scrollSpeed // words per second
             switch listeningMode {
             case .classic:
-                if !isPaused {
-                    timerWordProgress += speed * 0.05
+                if !playback.isPaused {
+                    playback.timerWordProgress += speed * 0.05
                 }
             case .silencePaused:
-                if !isPaused && speechRecognizer.isListening && speechRecognizer.isSpeaking {
-                    timerWordProgress += speed * 0.05
+                if !playback.isPaused && speechRecognizer.isListening && speechRecognizer.isSpeaking {
+                    playback.timerWordProgress += speed * 0.05
                 }
             case .wordTracking:
                 break
             }
         }
         .onChange(of: content.totalCharCount) { _, _ in
-            timerWordProgress = 0
+            playback.timerWordProgress = 0
         }
         .onChange(of: content.currentPageIndex) { _, _ in
-            timerWordProgress = 0
-            isUserScrolling = false
+            playback.timerWordProgress = 0
+            playback.isUserScrolling = false
         }
     }
 
@@ -1450,20 +1571,26 @@ struct FloatingOverlayView: View {
                 cueUnreadOpacity: NotchSettings.shared.cueBrightness.unreadOpacity,
                 cueReadOpacity: NotchSettings.shared.cueBrightness.readOpacity,
                 onWordTap: { charOffset in
+                    guard !playback.isInterrupted else { return }
                     if listeningMode == .wordTracking {
                         speechRecognizer.jumpTo(charOffset: charOffset)
                     } else {
-                        timerWordProgress = wordProgressForCharOffset(charOffset)
+                        playback.timerWordProgress = wordProgressForCharOffset(charOffset)
                     }
                 },
                 onManualScroll: { scrolling, newProgress in
-                    isUserScrolling = scrolling
+                    if playback.isInterrupted {
+                        // Finish an in-flight gesture without moving the saved position.
+                        if !scrolling { playback.isUserScrolling = false }
+                        return
+                    }
+                    playback.isUserScrolling = scrolling
                     if !scrolling {
-                        timerWordProgress = max(0, min(Double(words.count), newProgress))
+                        playback.timerWordProgress = max(0, min(Double(words.count), newProgress))
                     }
                 },
                 smoothScroll: listeningMode != .wordTracking,
-                smoothWordProgress: timerWordProgress,
+                smoothWordProgress: playback.timerWordProgress,
                 isListening: isEffectivelyListening,
                 readingPosition: NotchSettings.shared.readingPosition,
                 paragraphBreakBeforeWordIndices: NotchSettings.shared.showParagraphDividers
@@ -1481,7 +1608,7 @@ struct FloatingOverlayView: View {
                         ? Double(effectiveCharCount) / Double(totalCharCount)
                         : 0
                 )
-                .frame(width: 160, height: 24)
+                .frame(width: playback.onResumeLecture == nil ? 160 : 64, height: 24)
 
                 if let error = speechRecognizer.error {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
@@ -1503,9 +1630,18 @@ struct FloatingOverlayView: View {
                     Spacer()
                 }
 
+                if let resumeLecture = playback.onResumeLecture {
+                    Button("Resume lecture", action: resumeLecture)
+                        .font(.system(size: 11, weight: .semibold))
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.yellow)
+                        .help("Return to the lecture at the saved reading position")
+                }
+
                 if !followingCursor && content.pageCount > 1 {
                     if hasNextPage {
                         Button {
+                            guard !playback.isInterrupted else { return }
                             speechRecognizer.shouldAdvancePage = true
                         } label: {
                             Image(systemName: "forward.fill")
@@ -1519,11 +1655,13 @@ struct FloatingOverlayView: View {
                         .simultaneousGesture(
                             LongPressGesture(minimumDuration: 0.5)
                                 .onEnded { _ in
+                                    guard !playback.isInterrupted else { return }
                                     content.showPagePicker = true
                                 }
                         )
                     } else {
                         Button {
+                            guard !playback.isInterrupted else { return }
                             content.jumpToPageIndex = 0
                         } label: {
                             Image(systemName: "backward.end.fill")
@@ -1537,6 +1675,7 @@ struct FloatingOverlayView: View {
                         .simultaneousGesture(
                             LongPressGesture(minimumDuration: 0.5)
                                 .onEnded { _ in
+                                    guard !playback.isInterrupted else { return }
                                     content.showPagePicker = true
                                 }
                         )
@@ -1546,11 +1685,11 @@ struct FloatingOverlayView: View {
                 if !followingCursor {
                     if listeningMode == .classic {
                         Button {
-                            isPaused.toggle()
+                            if !playback.isInterrupted { playback.isPaused.toggle() }
                         } label: {
-                            Image(systemName: isPaused ? "play.fill" : "pause.fill")
+                            Image(systemName: playback.isPaused ? "play.fill" : "pause.fill")
                                 .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(isPaused ? .white.opacity(0.6) : .yellow.opacity(0.8))
+                                .foregroundStyle(playback.isPaused ? .white.opacity(0.6) : .yellow.opacity(0.8))
                                 .frame(width: 24, height: 24)
                                 .background(.white.opacity(0.15))
                                 .clipShape(Circle())
@@ -1602,18 +1741,51 @@ struct FloatingOverlayView: View {
         }
     }
 
+    private func handleCompletedPage() {
+        guard playback.isActive, !playback.isInterrupted, !playback.isPaused,
+              isDone else { return }
+        if listeningMode == .wordTracking { speechRecognizer.stop() }
+        if !hasNextPage {
+            if listeningMode == .wordTracking {
+                let revision = playback.completionRevision
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    guard playback.isActive, !playback.isInterrupted,
+                          playback.completionRevision == revision, isDone else { return }
+                    speechRecognizer.shouldDismiss = true
+                }
+            }
+        } else if (followingCursor || NotchSettings.shared.autoNextPage), countdownTimer == nil {
+            startCountdown()
+        }
+    }
+
     private func startCountdown() {
+        guard playback.isActive, !playback.isInterrupted, !playback.isPaused,
+              isDone else { return }
         countdownTimer?.invalidate()
         countdownRemaining = NotchSettings.shared.autoNextPageDelay
+        let generation = playback.generation
+        let revision = playback.completionRevision
         guard countdownRemaining > 0 else {
             countdownTimer = nil
             DispatchQueue.main.async {
+                guard playback.isActive, playback.generation == generation,
+                      playback.completionRevision == revision,
+                      !playback.isInterrupted, !playback.isPaused, isDone else { return }
                 speechRecognizer.shouldAdvancePage = true
             }
             return
         }
         countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { timer in
+            let tickRevision = playback.completionRevision
             DispatchQueue.main.async {
+                guard playback.isActive, playback.generation == generation, isDone else {
+                    timer.invalidate()
+                    return
+                }
+                // Discard ticks queued before an interruption, then resume future ticks.
+                guard playback.completionRevision == tickRevision,
+                      !playback.isInterrupted, !playback.isPaused else { return }
                 countdownRemaining -= 1
                 if countdownRemaining <= 0 {
                     timer.invalidate()
@@ -1642,6 +1814,7 @@ struct FloatingOverlayView: View {
                     let preview = i < content.pagePreviews.count ? content.pagePreviews[i] : ""
                     if !preview.isEmpty {
                         Button {
+                            guard !playback.isInterrupted else { return }
                             content.jumpToPageIndex = i
                             content.showPagePicker = false
                         } label: {
@@ -1697,6 +1870,7 @@ struct FloatingOverlayView: View {
                             .foregroundStyle(.white)
                     } else {
                         Button {
+                            guard !playback.isInterrupted else { return }
                             cancelCountdown()
                             speechRecognizer.shouldAdvancePage = true
                         } label: {

@@ -11,8 +11,16 @@ import Carbon
 
 @MainActor
 private func openTAAssistant() {
+    let service = TextreamService.shared
+    service.hideMainWindowImmediately()
     NSApp.activate(ignoringOtherApps: true)
-    TAAssistantWindow.shared.show { text in
+    let assistant = TAAssistantWindow.shared
+    let lecturePrompter = LecturePrompterBridge.shared
+    lecturePrompter.attach(session: assistant.lectureSession) { [weak assistant] in
+        assistant?.resumeLecture()
+    }
+    assistant.show(lecturePrompter: lecturePrompter,
+                   lectureReference: { lecturePrompter.lectureReferenceExcerpt() }) { text in
         // Classic scrolling keeps the meeting's system-audio recognizer active.
         let settings = NotchSettings.shared
         settings.listeningMode = .classic
@@ -21,7 +29,8 @@ private func openTAAssistant() {
             settings.notchDisplayMode = .fixedDisplay
             settings.pinnedScreenID = screen.displayID
         }
-        TextreamService.shared.overlayController.show(text: text, hasNextPage: false) {}
+        service.hideMainWindowImmediately()
+        service.overlayController.show(text: text, hasNextPage: false) {}
     }
 }
 
@@ -35,7 +44,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var assistantHotKey: EventHotKeyRef?
     private var assistantKeyHandler: EventHandlerRef?
     private let lifecycleLogger = Logger(
-        subsystem: Bundle.main.bundleIdentifier ?? "dev.fka.textream",
+        subsystem: Bundle.main.bundleIdentifier ?? "com.liyitingglitch.textream.ta",
         category: "AppLifecycle"
     )
 
@@ -62,11 +71,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             TextreamService.shared.hideMainWindow()
         }
 
-        #if !APP_STORE
-        // Direct-download builds check GitHub for updates. App Store builds are
-        // updated exclusively through the App Store.
-        UpdateChecker.shared.checkForUpdates(silent: true)
-        #endif
+        // TA builds are installed explicitly; never offer an upstream official update.
 
         // Start browser server if enabled
         TextreamService.shared.updateBrowserServer()
@@ -159,17 +164,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return .terminateCancel
     }
 
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows _: Bool) -> Bool {
         if TextreamService.shared.launchedExternally {
             TextreamService.shared.launchedExternally = false
             NSApp.setActivationPolicy(.regular)
         }
-        if !flag {
-            // Show existing window instead of letting SwiftUI create a duplicate
-            for window in NSApp.windows where !(window is NSPanel) {
-                window.makeKeyAndOrderFront(nil)
-                return false
-            }
+        // A Dock click explicitly requests the editor, even if a TA panel is visible.
+        for window in NSApp.windows where !(window is NSPanel) {
+            window.makeKeyAndOrderFront(nil)
+            return false
         }
         return true
     }
@@ -201,7 +204,7 @@ struct TextreamApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup("Textream TA") {
             ContentView()
                 .onOpenURL { url in
                     if url.pathExtension == "textream" {
@@ -222,13 +225,13 @@ struct TextreamApp: App {
                 .keyboardShortcut("a", modifiers: [.control, .option, .command])
             }
             CommandGroup(replacing: .appInfo) {
-                Button("About Textream") {
+                Button("About Textream TA") {
                     NotificationCenter.default.post(name: .openAbout, object: nil)
                 }
                 #if !APP_STORE
                 Divider()
-                Button("Check for Updates…") {
-                    UpdateChecker.shared.checkForUpdates()
+                Button("Download TA builds…") {
+                    UpdateChecker.shared.showBuildDownloads()
                 }
                 #endif
             }
@@ -265,8 +268,8 @@ struct TextreamApp: App {
             }
             CommandGroup(replacing: .windowArrangement) { }
             CommandGroup(replacing: .help) {
-                Button("Textream Help") {
-                    if let url = URL(string: "https://github.com/f/textream") {
+                Button("Textream TA Help") {
+                    if let url = URL(string: "https://github.com/liyiting-glitch/textream-ta/blob/codex/lecture-interrupt-resume/TA_ASSISTANT.md") {
                         NSWorkspace.shared.open(url)
                     }
                 }

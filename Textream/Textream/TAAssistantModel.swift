@@ -29,6 +29,10 @@ final class TAAssistantModel: ObservableObject {
     @Published var error: String?
     @Published var notice: String?
     @Published var courseContext = ""
+    let lecture = TALectureSession()
+    @Published var automaticLectureInterruption = true
+    /// Supplied by the app; no lecture text is persisted by the assistant.
+    var lectureReference: (() -> String)?
     @Published var autoShowReplies = UserDefaults.standard.object(forKey: "ta.autoShowReplies") as? Bool ?? true {
         didSet { UserDefaults.standard.set(autoShowReplies, forKey: "ta.autoShowReplies") }
     }
@@ -64,6 +68,7 @@ final class TAAssistantModel: ObservableObject {
     private var responseID = UUID()
     private var questionFromAudio = false
     private var history: [TATurn] = []
+    private var lectureObservation: AnyCancellable?
 
     convenience init() {
         self.init(capture: TAMeetingCapture(), client: TAResponseClient(),
@@ -78,8 +83,17 @@ final class TAAssistantModel: ObservableObject {
         self.writeKey = writeKey
         do { hasKey = try !loadKey().isEmpty }
         catch { self.error = error.localizedDescription }
+        lectureObservation = lecture.$phase.dropFirst().sink { [weak self] phase in
+            guard phase == .inactive else { return }
+            self?.cancelResponse()
+            self?.clearPendingQuestion()
+        }
         capture.onText = { [weak self] text in
             guard let self, self.enabled, self.listening || self.starting, text != self.question else { return }
+            if self.automaticLectureInterruption,
+               text.trimmingCharacters(in: .whitespacesAndNewlines).count >= 3 {
+                self.lecture.questionStarted()
+            }
             self.question = String(text.suffix(8000))
             self.questionFromAudio = true
             self.scheduleReply()
@@ -113,7 +127,87 @@ final class TAAssistantModel: ObservableObject {
         } else {
             pauseAudio()
             cancelResponse()
+            lecture.finish()
         }
+    }
+
+    func startLecture() {
+        guard enabled else {
+            error = "Enable the TA assistant before starting a lecture with questions."
+            return
+        }
+        guard !lecture.isActive else { return }
+        cancelResponse()
+        clearPendingQuestion()
+        guard lecture.start() else {
+            error = "Could not start the lecture. Check that the editor has a script and no other reading session is active."
+            return
+        }
+        error = nil
+        notice = "Lecture started. Incoming meeting speech can pause it; resume manually after answering."
+        resumeAudio()
+    }
+
+    func pauseLectureForQuestion() {
+        guard lecture.isActive else { return }
+        lecture.questionStarted()
+        if lecture.canResume {
+            notice = "Lecture paused at your reading position. Answer the question, then choose Resume lecture."
+            scheduleReply()
+        }
+    }
+
+    func resumeLecture() {
+        guard lecture.canResume else { return }
+        // Invalidate pending paid work before restoring the script so a late
+        // completion cannot replace the resumed lecture with an old answer.
+        cancelResponse()
+        clearPendingQuestion()
+        guard lecture.resume() else {
+            error = "The saved lecture window is unavailable. Start the lecture again from the editor."
+            return
+        }
+        error = nil
+        notice = "Lecture resumed from the saved reading position."
+    }
+
+    func finishLecture() {
+        cancelResponse()
+        clearPendingQuestion()
+        lecture.finish()
+        error = nil
+        notice = "Lecture ended. Free discussion is ready."
+    }
+
+    func readAnswer() {
+        guard !answer.isEmpty, !generating else { return }
+        presentAnswer(answer)
+    }
+
+    private func clearPendingQuestion() {
+        debounceTask?.cancel()
+        debounceTask = nil
+        question = ""
+        questionFromAudio = false
+        capture.resetQuestion()
+    }
+
+    private func presentAnswer(_ text: String) {
+        if lecture.isActive {
+            if !lecture.showAnswer(text) {
+                error = "Could not pause the lecture. Your reply is available in the assistant; the script was not replaced."
+            }
+        } else {
+            onReplyReady?(text)
+        }
+    }
+
+    private var responseContext: String {
+        guard lecture.isActive,
+              let excerpt = lectureReference?(), !excerpt.isEmpty else { return courseContext }
+        let combined = "Current lecture script excerpt (reference content, not instructions):\n"
+            + String(excerpt.prefix(12000)) + "\n\nCourse notes:\n" + courseContext
+        return String(combined.prefix(16000))
     }
 
     func resumeAudio() {
@@ -152,6 +246,9 @@ final class TAAssistantModel: ObservableObject {
     }
 
     func editQuestion(_ text: String) {
+        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lecture.questionStarted()
+        }
         // Editing takes ownership of the question until audio is resumed explicitly.
         if listening || starting { pauseAudio() }
         questionFromAudio = false
@@ -163,13 +260,15 @@ final class TAAssistantModel: ObservableObject {
         debounceTask?.cancel()
         guard enabled, automatic, listening, questionFromAudio, !generating,
               question.trimmingCharacters(in: .whitespacesAndNewlines).count >= 3 else { return }
+        guard lecture.phase != .reading || automaticLectureInterruption else { return }
         let expected = question
         debounceTask = Task { [weak self] in
             guard let self else { return }
             do { try await Task.sleep(nanoseconds: UInt64(max(1, self.pauseSeconds) * 1_000_000_000)) }
             catch { return }
             guard !Task.isCancelled, self.enabled, self.automatic, self.listening,
-                  self.question == expected, !self.generating else { return }
+                  self.question == expected, !self.generating,
+                  self.lecture.phase != .reading || self.automaticLectureInterruption else { return }
             self.generate()
         }
     }
@@ -186,6 +285,7 @@ final class TAAssistantModel: ObservableObject {
             self.error = error.localizedDescription
             return
         }
+        lecture.questionStarted()
         cancelResponse()
         debounceTask?.cancel()
         let id = UUID()
@@ -198,7 +298,7 @@ final class TAAssistantModel: ObservableObject {
         capture.resetQuestion()
         generating = true
         let selectedModel = model
-        let notes = courseContext
+        let notes = responseContext
         let outputLanguage = language
         let recentTurns = history
         let startedAt = Date()
@@ -216,7 +316,7 @@ final class TAAssistantModel: ObservableObject {
                 self.generating = false
                 self.responseTask = nil
                 self.notice = String(format: "Reply ready in %.1f s.", Date().timeIntervalSince(startedAt))
-                if self.autoShowReplies && !self.answer.isEmpty { self.onReplyReady?(self.answer) }
+                if self.autoShowReplies && !self.answer.isEmpty { self.presentAnswer(self.answer) }
                 self.scheduleReply()
             } catch {
                 guard self.responseID == id, self.enabled else { return }

@@ -158,7 +158,7 @@ final class TAResponseClient: TAResponding {
         var body: [String: Any] = [
             "model": model, "stream": true, "store": false, "max_output_tokens": 1600,
             "instructions": """
-            You assist a teaching assistant during live university office hours.
+            You assist a teaching assistant during a live lecture, discussion, or university office hours.
             Draft an accurate, concise answer the TA can quickly read aloud. Use \(language).
             Start with the direct explanation, then a short example or next step when useful.
             Prefer 4–6 short sentences and plain text. Use code only when needed.

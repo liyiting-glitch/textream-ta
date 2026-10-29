@@ -7,12 +7,21 @@ final class TAAssistantWindow: NSObject, NSWindowDelegate {
     private var panel: NSPanel?
     private let model = TAAssistantModel()
 
-    func show(onRead: @escaping (String) -> Void) {
+    var lectureSession: TALectureSession { model.lecture }
+
+    func resumeLecture() { model.resumeLecture() }
+
+    func show(lecturePrompter: TALecturePrompter? = nil,
+              lectureReference: (() -> String)? = nil,
+              onRead: @escaping (String) -> Void) {
+        if let lecturePrompter { model.lecture.attach(lecturePrompter) }
+        model.lectureReference = lectureReference
+        model.onReplyReady = onRead
         if let panel { panel.makeKeyAndOrderFront(nil); return }
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 560, height: 730),
                             styleMask: [.titled, .closable, .resizable, .utilityWindow],
                             backing: .buffered, defer: false)
-        panel.title = "Textream · TA Assistant"
+        panel.title = "Textream TA · Assistant"
         panel.level = .floating
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
@@ -79,6 +88,8 @@ struct TAAssistantView: View {
                     Toggle("Show completed replies in notch automatically", isOn: $model.autoShowReplies)
                 }
 
+                TALectureControls(model: model, lecture: model.lecture)
+
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text("QUESTION / LIVE TRANSCRIPT").font(.caption.weight(.semibold))
@@ -111,7 +122,7 @@ struct TAAssistantView: View {
                             NSPasteboard.general.setString(model.answer, forType: .string)
                         }.disabled(model.answer.isEmpty)
                         Button("Read in prompter") {
-                            onRead(model.answer)
+                            model.readAnswer()
                         }.disabled(model.answer.isEmpty || model.generating)
                     }
                     if !model.answeredQuestion.isEmpty {
@@ -174,5 +185,53 @@ struct TAAssistantView: View {
         if model.generating { return "Writing a reply…" }
         if model.listening { return "Listening to meeting audio" }
         return "Audio paused · type a question or resume audio"
+    }
+}
+
+@MainActor
+private struct TALectureControls: View {
+    @ObservedObject var model: TAAssistantModel
+    @ObservedObject var lecture: TALectureSession
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Lecture + Q&A", systemImage: "text.book.closed")
+                    .font(.headline)
+                Text(phaseDescription).font(.caption).foregroundColor(.secondary)
+                if lecture.isActive {
+                    Toggle("Pause lecture when meeting speech is detected", isOn: $model.automaticLectureInterruption)
+                        .font(.caption)
+                    HStack {
+                        if lecture.canResume {
+                            Button("Resume lecture") { model.resumeLecture() }
+                                .buttonStyle(.borderedProminent)
+                        } else {
+                            Button("Pause for question") { model.pauseLectureForQuestion() }
+                        }
+                        Spacer()
+                        Button("Finish lecture / free discussion") { model.finishLecture() }
+                    }
+                    Text("Your script and reading position stay saved. Closing an answer does not resume the lecture; choose Resume lecture when you have finished speaking.")
+                        .font(.caption2).foregroundColor(.secondary)
+                } else {
+                    Button("Start lecture from editor") { model.startLecture() }
+                        .disabled(!model.enabled)
+                    Text("Put your prepared script in the main editor first. A nearby script excerpt and course notes (16,000 characters combined) are included with lecture questions. The script itself is not rewritten.")
+                        .font(.caption2).foregroundColor(.secondary)
+                }
+                Text("Only Mac playback is heard. Incoming speech can include unrelated audio; use Pause for question if you need to stop before transcription appears.")
+                    .font(.caption2).foregroundColor(.secondary)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var phaseDescription: String {
+        switch lecture.phase {
+        case .inactive: return "Free discussion · no lecture position saved"
+        case .reading: return "Reading your prepared lecture"
+        case .question: return "Lecture paused · answer the question, then resume manually"
+        case .answer: return "Temporary answer · your lecture remains paused"
+        }
     }
 }

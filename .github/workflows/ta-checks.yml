@@ -7,11 +7,13 @@ on:
     paths:
       - 'Textream/**'
       - 'TARegressionTests.swift'
+      - 'TALectureRegressionTests.swift'
       - '.github/workflows/ta-checks.yml'
   pull_request:
     paths:
       - 'Textream/**'
       - 'TARegressionTests.swift'
+      - 'TALectureRegressionTests.swift'
       - '.github/workflows/ta-checks.yml'
 
 permissions:
@@ -47,6 +49,16 @@ jobs:
             -o "$RUNNER_TEMP/ta-regression-tests"
           "$RUNNER_TEMP/ta-regression-tests" | tee ta-tests.log
 
+      - name: Lecture interruption checks (mock reader)
+        shell: bash
+        run: |
+          set -euo pipefail
+          swiftc -swift-version 5 -default-isolation MainActor \
+            -target "$(uname -m)-apple-macosx15.0" \
+            Textream/Textream/TALectureSession.swift TALectureRegressionTests.swift \
+            -o "$RUNNER_TEMP/ta-lecture-tests"
+          "$RUNNER_TEMP/ta-lecture-tests" | tee ta-lecture-tests.log
+
       - name: Build complete macOS app
         shell: bash
         run: |
@@ -63,14 +75,36 @@ jobs:
         run: |
           set -euo pipefail
           ditto -c -k --sequesterRsrc --keepParent \
-            "$RUNNER_TEMP/TextreamBuild/Build/Products/Release/Textream.app" \
+            "$RUNNER_TEMP/TextreamBuild/Build/Products/Release/Textream TA.app" \
             Textream-TA-unsigned.zip
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, plistlib, subprocess
+          app = pathlib.Path(os.environ['RUNNER_TEMP']) / 'TextreamBuild/Build/Products/Release/Textream TA.app'
+          info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
+          assert info['CFBundleIdentifier'] == 'com.liyitingglitch.textream.ta'
+          assert info['CFBundleName'] == 'Textream TA'
+          executable = app / 'Contents/MacOS' / info['CFBundleExecutable']
+          manifest = {
+              'source_commit': os.environ['GITHUB_SHA'],
+              'ci_url': 'https://github.com/' + os.environ['GITHUB_REPOSITORY'] + '/actions/runs/' + os.environ['GITHUB_RUN_ID'],
+              'bundle_identifier': info['CFBundleIdentifier'],
+              'app_name': info['CFBundleName'],
+              'version': info['CFBundleShortVersionString'],
+              'build': info['CFBundleVersion'],
+              'architectures': subprocess.check_output(['lipo', '-archs', str(executable)], text=True).strip().split(),
+              'executable_sha256': hashlib.sha256(executable.read_bytes()).hexdigest(),
+              'unsigned_zip_sha256': hashlib.sha256(pathlib.Path('Textream-TA-unsigned.zip').read_bytes()).hexdigest()
+          }
+          pathlib.Path('Textream-TA-build.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          PY
 
       - name: Upload test build
         uses: actions/upload-artifact@v4
         with:
           name: Textream-TA-unsigned
-          path: Textream-TA-unsigned.zip
+          path: |
+            Textream-TA-unsigned.zip
+            Textream-TA-build.json
           retention-days: 7
           if-no-files-found: error
 
@@ -81,6 +115,7 @@ jobs:
           name: TA-validation-logs
           path: |
             ta-tests.log
+            ta-lecture-tests.log
             ta-build.log
           retention-days: 7
           if-no-files-found: ignore
